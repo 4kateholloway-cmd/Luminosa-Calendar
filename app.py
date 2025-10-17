@@ -184,6 +184,7 @@ if st.button("Generate Schedule", type="primary"):
         st.dataframe(summary, use_container_width=True)
 else:
     st.info("Upload your CSVs, tune weights and rest hours, then click **Generate Schedule**.")
+    # redeploy
 
 
 
