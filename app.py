@@ -1,25 +1,23 @@
+# app.py — fallback version (no OR-Tools required)
 
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
-from ortools.sat.python import cp_model
+from datetime import datetime
 
-st.set_page_config(page_title="Physician Call Scheduler (MVP)", layout="wide")
-
-st.title("Physician Call Scheduler (MVP)")
-st.caption("Upload your doctors, shifts, and vacations CSVs, then click **Generate Schedule**.")
+st.set_page_config(page_title="Physician Call Scheduler (Fallback)", layout="wide")
+st.title("Physician Call Scheduler — Fallback (No OR-Tools)")
+st.caption("Upload doctors, shifts, and vacations CSVs, then click Generate. Uses a simple round-robin algorithm with PTO blocking.")
 
 with st.expander("CSV format help", expanded=False):
     st.markdown("""
-    **doctors.csv** (required)
+    **doctors.csv**
     - Columns: `id` (int), `name` (str), `fte` (float)
-    
-    **shifts.csv** (required)
-    - Columns: `id` (int), `start` (ISO datetime), `end` (ISO datetime), `kind` (str), `is_weekend` (bool), `is_holiday` (bool)
-    - Example datetime: `2025-10-01 07:00`
-    
+
+    **shifts.csv**
+    - Columns: `id` (int), `start` (YYYY-MM-DD HH:MM), `end` (YYYY-MM-DD HH:MM), `kind` (str), `is_weekend` (bool), `is_holiday` (bool)
+
     **vacations.csv** (optional)
-    - Columns: `doctor_id` (int), `start` (ISO datetime or date), `end` (ISO datetime or date)
+    - Columns: `doctor_id` (int), `start` (date or datetime), `end` (date or datetime)
     """)
 
 col1, col2, col3 = st.columns(3)
@@ -31,10 +29,9 @@ with col3:
     vacations_file = st.file_uploader("Upload vacations.csv (optional)", type=["csv"], key="vacations")
 
 def parse_bool(x):
-    if isinstance(x, bool):
-        return x
+    if isinstance(x, bool): return x
     s = str(x).strip().lower()
-    return s in ("1", "true", "t", "yes", "y")
+    return s in ("1","true","t","yes","y")
 
 def load_data():
     if not doctors_file or not shifts_file:
@@ -42,7 +39,8 @@ def load_data():
     doctors = pd.read_csv(doctors_file)
     shifts = pd.read_csv(shifts_file)
     vacations = pd.read_csv(vacations_file) if vacations_file else pd.DataFrame(columns=["doctor_id","start","end"])
-    # Normalize
+
+    # normalize types
     doctors["id"] = doctors["id"].astype(int)
     doctors["fte"] = doctors["fte"].astype(float)
     shifts["id"] = shifts["id"].astype(int)
@@ -57,99 +55,70 @@ def load_data():
     return doctors, shifts, vacations
 
 st.markdown("---")
-WEEKEND_WEIGHT = st.number_input("Weekend weight", value=1.5, step=0.1, min_value=0.0)
-HOLIDAY_WEIGHT = st.number_input("Holiday weight", value=2.0, step=0.1, min_value=0.0)
-MIN_REST_HOURS = st.number_input("Min rest between calls (hours)", value=24, step=1, min_value=0)
+WEEKEND_WEIGHT = st.number_input("Weekend weight (for summary only)", value=1.5, step=0.1, min_value=0.0)
+HOLIDAY_WEIGHT = st.number_input("Holiday weight (for summary only)", value=2.0, step=0.1, min_value=0.0)
 
-def shift_weight(row):
-    w = 1.0
-    if row["is_weekend"]:
-        w *= WEEKEND_WEIGHT
-    if row["is_holiday"]:
-        w *= HOLIDAY_WEIGHT
-    return w
+def overlaps(a_start, a_end, b_start, b_end):
+    return not (a_end <= b_start or a_start >= b_end)
 
-def solve(doctors_df, shifts_df, vacations_df):
-    model = cp_model.CpModel()
-    D = len(doctors_df)
-    S = len(shifts_df)
-    # Variables
-    x = {}
-    for s in range(S):
-        for d in range(D):
-            x[(s,d)] = model.NewBoolVar(f"x_s{s}_d{d}")
-    # Each shift covered exactly once
-    for s in range(S):
-        model.Add(sum(x[(s,d)] for d in range(D)) == 1)
-    # Vacations: block assignments that overlap
+def fallback_round_robin(doctors_df, shifts_df, vacations_df):
+    """Assigns shifts in order, skipping doctors who are on PTO for that shift.
+       Simple and predictable; does NOT enforce rest windows or complex fairness.
+    """
+    d_ids = doctors_df["id"].tolist()
+    name_by_id = dict(zip(doctors_df["id"], doctors_df["name"]))
     vac_map = {}
     for _, v in vacations_df.iterrows():
         vac_map.setdefault(int(v["doctor_id"]), []).append((v["start"], v["end"]))
-    for s, sh in shifts_df.reset_index().iterrows():
-        for d, doc in doctors_df.reset_index().iterrows():
-            blocks = False
-            for (vs, ve) in vac_map.get(int(doc["id"]), []):
-                if not (sh["end"] <= vs or sh["start"] >= ve):
-                    blocks = True
-                    break
-            if blocks:
-                model.Add(x[(s,d)] == 0)
-    # Min rest between calls
-    for d in range(D):
-        for s1 in range(S):
-            for s2 in range(S):
-                if s1 >= s2: 
-                    continue
-                dt = (shifts_df.iloc[s2]["start"] - shifts_df.iloc[s1]["end"]).total_seconds() / 3600.0
-                if -MIN_REST_HOURS < dt < MIN_REST_HOURS:
-                    model.Add(x[(s1,d)] + x[(s2,d)] <= 1)
-    # Balancing objective (weighted)
-    weights = shifts_df.apply(shift_weight, axis=1).tolist()
-    total_weight = sum(weights)
-    total_fte = doctors_df["fte"].sum()
-    target_per_fte = total_weight / total_fte if total_fte > 0 else 0.0
-    totals = []
-    devs = []
-    for d, doc in doctors_df.reset_index().iterrows():
-        tot = model.NewIntVar(0, 100000, f"tot_d{d}")
-        # Multiply by 100 to avoid floats
-        model.Add(tot == sum(int(weights[s]*100) * x[(s,d)] for s in range(S)))
-        totals.append(tot)
-        target = int(target_per_fte * float(doc["fte"]) * 100)
-        dev_pos = model.NewIntVar(0, 100000, f"devp_d{d}")
-        dev_neg = model.NewIntVar(0, 100000, f"devn_d{d}")
-        model.Add(tot - target == dev_pos - dev_neg)
-        devs += [dev_pos, dev_neg]
-    # Small penalty for consecutive days
-    consec_hits = []
-    for d in range(D):
-        for s in range(S-1):
-            hit = model.NewBoolVar(f"consec_d{d}_s{s}")
-            model.Add(hit >= x[(s,d)] + x[(s+1,d)] - 1)
-            consec_hits.append(hit)
-    model.Minimize(10 * sum(devs) + 1 * sum(consec_hits))
-    solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 5.0
-    res = solver.Solve(model)
-    if res not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        return None, "No feasible schedule with the current constraints."
-    # Build output
+
     rows = []
-    for s, sh in shifts_df.reset_index().iterrows():
-        for d, doc in doctors_df.reset_index().iterrows():
-            if solver.Value(x[(s,d)]) == 1:
-                rows.append({
-                    "shift_id": int(sh["id"]),
-                    "start": sh["start"],
-                    "end": sh["end"],
-                    "kind": sh["kind"],
-                    "is_weekend": bool(sh["is_weekend"]),
-                    "is_holiday": bool(sh["is_holiday"]),
-                    "doctor_id": int(doc["id"]),
-                    "doctor": str(doc["name"]),
-                })
+    ix = 0
+    for _, sh in shifts_df.sort_values(["start","id"]).iterrows():
+        assigned = False
+        tried = 0
+        while tried < len(d_ids):
+            d = d_ids[ix % len(d_ids)]
+            ix += 1
+            tried += 1
+
+            # block if PTO overlaps
+            blocked = False
+            for (vs, ve) in vac_map.get(int(d), []):
+                if overlaps(sh["start"], sh["end"], vs, ve):
+                    blocked = True
+                    break
+            if blocked:
+                continue
+
+            # assign!
+            rows.append({
+                "shift_id": int(sh["id"]),
+                "start": sh["start"],
+                "end": sh["end"],
+                "kind": sh["kind"],
+                "is_weekend": bool(sh["is_weekend"]),
+                "is_holiday": bool(sh["is_holiday"]),
+                "doctor_id": int(d),
+                "doctor": name_by_id[d],
+            })
+            assigned = True
+            break
+
+        if not assigned:
+            return None, f"Could not place shift {sh['id']} ({sh['start']}→{sh['end']}) due to overlapping PTO for all doctors."
+
     out = pd.DataFrame(rows).sort_values(["start","shift_id"]).reset_index(drop=True)
     return out, None
+
+def add_weights(df):
+    w = []
+    for _, r in df.iterrows():
+        wt = 1.0
+        if r["is_weekend"]: wt *= WEEKEND_WEIGHT
+        if r["is_holiday"]: wt *= HOLIDAY_WEIGHT
+        w.append(wt)
+    df = df.copy(); df["weight"] = w
+    return df
 
 if st.button("Generate Schedule", type="primary"):
     try:
@@ -157,34 +126,32 @@ if st.button("Generate Schedule", type="primary"):
     except Exception as e:
         st.error(f"Error reading CSVs: {e}")
         st.stop()
-    schedule, err = solve(doctors, shifts, vacations)
+
+    schedule, err = fallback_round_robin(doctors, shifts, vacations)
     if err:
         st.error(err)
     else:
-        st.success("Schedule generated!")
+        st.success("Schedule generated (fallback mode).")
         st.dataframe(schedule, use_container_width=True)
-        # Download as CSV
+
+        # Download CSV
         csv = schedule.to_csv(index=False).encode("utf-8")
         st.download_button("Download schedule.csv", data=csv, file_name="schedule.csv", mime="text/csv")
-        # Basic fairness summary
-        st.subheader("Fairness summary")
-        weights = []
-        for _, row in schedule.iterrows():
-            w = 1.0
-            if row["is_weekend"]:
-                w *= WEEKEND_WEIGHT
-            if row["is_holiday"]:
-                w *= HOLIDAY_WEIGHT
-            weights.append(w)
-        schedule["weight"] = weights
-        summary = schedule.groupby(["doctor"]).agg(
+
+        # Fairness summary (informational)
+        st.subheader("Fairness summary (informational)")
+        weighted = add_weights(schedule)
+        summary = weighted.groupby("doctor").agg(
             shifts=("shift_id","count"),
-            weighted_calls=("weight","sum")
+            weighted_calls=("weight","sum"),
+            weekends=("is_weekend","sum"),
+            holidays=("is_holiday","sum"),
         ).reset_index()
         st.dataframe(summary, use_container_width=True)
+
 else:
-    st.info("Upload your CSVs, tune weights and rest hours, then click **Generate Schedule**.")
-    # redeploy
+    st.info("Upload your CSVs and click **Generate Schedule**.")
+
 
 
 
