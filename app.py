@@ -1,4 +1,4 @@
-# app.py — Luminosa Call Scheduler (Fallback, calendar + manual doctors editor)
+# app.py — Luminosa Call Scheduler (Fallback, built-in Laborist doctors)
 # requirements.txt:
 # streamlit==1.40.0
 # pandas==2.2.3
@@ -10,8 +10,32 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 st.set_page_config(page_title="Physician Call Scheduler", layout="wide")
-st.title("Physician Call Scheduler — Fallback (No OR-Tools)")
-st.caption("Upload CSVs or build your doctor list in-app. Uses a simple round-robin algorithm with PTO blocking. Calendar view included.")
+st.title("Physician Call Scheduler — Luminosa (Built-in Doctors)")
+st.caption("Uses a simple round-robin algorithm with PTO blocking. Calendar view included. Doctors list is built into the app.")
+
+# ---------- Built-in Laborist doctors (permanent for now) ----------
+DOCTORS_DEFAULT = [
+    {"id": 1,  "name": "Holloway",        "fte": 1.0},
+    {"id": 2,  "name": "Barnard",         "fte": 1.0},
+    {"id": 3,  "name": "Shields",         "fte": 1.0},
+    {"id": 4,  "name": "Mal Thompson",    "fte": 1.0},
+    {"id": 5,  "name": "Yaghi",           "fte": 1.0},
+    {"id": 6,  "name": "Simpson",         "fte": 1.0},
+    {"id": 7,  "name": "Arya",            "fte": 1.0},
+    {"id": 8,  "name": "Shaefer",         "fte": 1.0},
+    {"id": 9,  "name": "Ramos-Gonzales",  "fte": 1.0},
+    {"id": 10, "name": "Troy",            "fte": 1.0},
+    {"id": 11, "name": "Carroll",         "fte": 1.0},
+    {"id": 12, "name": "Landez",          "fte": 1.0},
+    {"id": 13, "name": "Zamora",          "fte": 1.0},
+    {"id": 14, "name": "Dutta",           "fte": 1.0},
+    {"id": 15, "name": "Chavarria",       "fte": 1.0},
+    {"id": 16, "name": "Garza",           "fte": 1.0},
+    {"id": 17, "name": "Do",              "fte": 1.0},
+    {"id": 18, "name": "Truong",          "fte": 1.0},
+    {"id": 19, "name": "Galindo",         "fte": 1.0},
+]
+DOCTORS_DF = pd.DataFrame(DOCTORS_DEFAULT, columns=["id","name","fte"]).astype({"id":int,"fte":float})
 
 # ---------- Sidebar options ----------
 with st.sidebar:
@@ -20,61 +44,27 @@ with st.sidebar:
     HOLIDAY_WEIGHT = st.number_input("Holiday weight (summary only)", value=2.0, step=0.1, min_value=0.0)
     default_view = st.selectbox("Calendar default view", ["dayGridMonth", "timeGridWeek", "timeGridDay"], index=0)
     show_week_numbers = st.checkbox("Show week numbers", value=False)
-    if st.button("Clear schedule"):
+    st.divider()
+    st.subheader("Built-in Doctors")
+    st.dataframe(DOCTORS_DF, use_container_width=True, hide_index=True)
+    st.download_button(
+        "Download doctors.csv",
+        data=DOCTORS_DF.to_csv(index=False).encode("utf-8"),
+        file_name="doctors.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
+    if st.button("Clear generated schedule"):
         st.session_state.pop("schedule_df", None)
         st.session_state.pop("schedule_msg", None)
         st.rerun()
 
 with st.expander("CSV format help", expanded=False):
     st.markdown("""
-    **doctors.csv** → `id` (int), `name` (str), `fte` (float)  
     **shifts.csv** → `id` (int), `start` (YYYY-MM-DD HH:MM), `end` (YYYY-MM-DD HH:MM), `kind` (str), `is_weekend` (bool), `is_holiday` (bool)  
     **vacations.csv** (optional) → `doctor_id` (int), `start`, `end` (date or datetime)  
     Save as **CSV UTF-8** from Excel/Numbers to avoid encoding errors.
     """)
-
-# ---------- Manual Doctors Editor ----------
-st.subheader("Create a doctors list manually (optional)")
-if "doctors_df_manual" not in st.session_state:
-    st.session_state["doctors_df_manual"] = pd.DataFrame(
-        {"id": pd.Series(dtype="int"),
-         "name": pd.Series(dtype="str"),
-         "fte": pd.Series(dtype="float")}
-    )
-
-edited_df = st.data_editor(
-    st.session_state["doctors_df_manual"],
-    num_rows="dynamic",
-    use_container_width=True,
-    key="doctor_editor",
-    column_config={
-        "id": st.column_config.NumberColumn("id", help="Unique integer ID"),
-        "name": st.column_config.TextColumn("name", help="Doctor name"),
-        "fte": st.column_config.NumberColumn("fte", min_value=0.1, max_value=1.5, step=0.1, help="Full-time equivalent")
-    }
-)
-st.session_state["doctors_df_manual"] = edited_df
-
-c_dl1, c_dl2 = st.columns(2)
-with c_dl1:
-    if st.button("Auto-fill IDs & FTE = 1.0 for blanks"):
-        df = st.session_state["doctors_df_manual"].copy()
-        # Fill name blanks first (drop truly empty rows)
-        df = df[df["name"].astype(str).str.strip() != ""]
-        # Assign IDs if missing or duplicated
-        if "id" not in df or df["id"].isna().any() or df["id"].duplicated().any():
-            df = df.reset_index(drop=True)
-            df["id"] = range(1, len(df) + 1)
-        # Default FTE 1.0 if missing
-        if "fte" not in df:
-            df["fte"] = 1.0
-        df["fte"] = df["fte"].fillna(1.0)
-        st.session_state["doctors_df_manual"] = df
-        st.success("IDs and FTE filled.")
-
-with c_dl2:
-    csv_bytes = st.session_state["doctors_df_manual"].to_csv(index=False).encode("utf-8")
-    st.download_button("Download doctors.csv", data=csv_bytes, file_name="doctors.csv", mime="text/csv", use_container_width=True)
 
 # ---------- Helpers ----------
 def parse_bool(x):
@@ -102,7 +92,6 @@ def fallback_round_robin(doctors_df, shifts_df, vacations_df):
         for _ in range(len(d_ids)):
             d = d_ids[ix % len(d_ids)]
             ix += 1
-            # block if PTO overlaps
             blocked = any(overlaps(sh["start"], sh["end"], vs, ve) for (vs, ve) in vac_map.get(int(d), []))
             if blocked:
                 continue
@@ -137,10 +126,7 @@ st.markdown("---")
 st.subheader("Generate schedule")
 
 with st.form("inputs_form", clear_on_submit=False):
-    use_manual_doctors = st.checkbox("Use the manual doctor list above (ignore doctors.csv upload)", value=True)
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        f_doctors = st.file_uploader("Upload doctors.csv", type=["csv"], key="doctors_up", disabled=use_manual_doctors)
+    c2, c3 = st.columns(2)
     with c2:
         f_shifts = st.file_uploader("Upload shifts.csv", type=["csv"], key="shifts_up")
     with c3:
@@ -149,31 +135,8 @@ with st.form("inputs_form", clear_on_submit=False):
 
 if submitted:
     try:
-        # Doctors source: manual or file
-        if use_manual_doctors:
-            doctors = st.session_state["doctors_df_manual"].copy()
-            doctors = doctors[doctors["name"].astype(str).str.strip() != ""]
-            # Validate/fill
-            if doctors.empty:
-                st.session_state["schedule_df"] = None
-                st.session_state["schedule_msg"] = "Enter at least one doctor in the manual table."
-            else:
-                # ensure id and fte
-                if "id" not in doctors.columns or doctors["id"].isna().any() or doctors["id"].duplicated().any():
-                    doctors = doctors.reset_index(drop=True)
-                    doctors["id"] = range(1, len(doctors) + 1)
-                if "fte" not in doctors.columns:
-                    doctors["fte"] = 1.0
-                doctors["id"] = doctors["id"].astype(int)
-                doctors["fte"] = doctors["fte"].astype(float)
-        else:
-            if not f_doctors:
-                st.session_state["schedule_df"] = None
-                st.session_state["schedule_msg"] = "Please upload doctors.csv or check 'Use the manual doctor list'."
-            else:
-                doctors = pd.read_csv(f_doctors)
-                doctors["id"] = doctors["id"].astype(int)
-                if "fte" in doctors.columns: doctors["fte"] = doctors["fte"].astype(float)
+        # Use built-in doctors
+        doctors = DOCTORS_DF.copy()
 
         # Shifts & vacations
         if not f_shifts:
@@ -186,6 +149,7 @@ if submitted:
             shifts["end"] = pd.to_datetime(shifts["end"])
             shifts["is_weekend"] = shifts["is_weekend"].apply(parse_bool)
             shifts["is_holiday"] = shifts["is_holiday"].apply(parse_bool)
+
             vacations = pd.read_csv(f_vac) if f_vac else pd.DataFrame(columns=["doctor_id","start","end"])
             if not vacations.empty:
                 vacations["doctor_id"] = vacations["doctor_id"].astype(int)
@@ -269,6 +233,7 @@ if schedule is not None:
         st.dataframe(summary, use_container_width=True)
 
 else:
-    st.info("Upload your CSVs or build your doctors list above, then click **Generate Schedule**.")
+    st.info("Upload your **shifts.csv** (and optional **vacations.csv**) above, then click **Generate Schedule**.")
+
 
 
