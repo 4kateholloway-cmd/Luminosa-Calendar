@@ -1,4 +1,4 @@
-# app.py — Luminosa Call Scheduler (Fallback, built-in Laborist doctors)
+# app.py — Luminosa Call Scheduler (Built-in doctors, stable calendar + diagnostic)
 # requirements.txt:
 # streamlit==1.40.0
 # pandas==2.2.3
@@ -9,9 +9,9 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Physician Call Scheduler", layout="wide")
+st.set_page_config(page_title="Physician Call Scheduler — Luminosa", layout="wide")
 st.title("Physician Call Scheduler — Luminosa (Built-in Doctors)")
-st.caption("Uses a simple round-robin algorithm with PTO blocking. Calendar view included. Doctors list is built into the app.")
+st.caption("Simple round-robin with PTO blocking. Calendar view included. Doctors list is built into the app.")
 
 # ---------- Built-in Laborist doctors (permanent for now) ----------
 DOCTORS_DEFAULT = [
@@ -89,6 +89,7 @@ def fallback_round_robin(doctors_df, shifts_df, vacations_df):
     rows, ix = [], 0
     for _, sh in shifts_df.sort_values(["start","id"]).iterrows():
         assigned = False
+        # rotate across doctors until one is not on PTO
         for _ in range(len(d_ids)):
             d = d_ids[ix % len(d_ids)]
             ix += 1
@@ -137,6 +138,19 @@ if submitted:
     try:
         # Use built-in doctors
         doctors = DOCTORS_DF.copy()
+
+        # --- Sanitize doctors: drop blanks, force sequential IDs, ensure float FTE ---
+        doctors = doctors.copy()
+        if "name" in doctors.columns:
+            doctors = doctors[doctors["name"].astype(str).str.strip() != ""]
+        doctors = doctors.reset_index(drop=True)
+        doctors["id"] = range(1, len(doctors) + 1)
+        if "fte" not in doctors.columns:
+            doctors["fte"] = 1.0
+        doctors["fte"] = doctors["fte"].astype(float)
+
+        # --- Diagnostic: show how many doctors were loaded ---
+        st.info(f"Loaded {len(doctors)} doctors: " + ", ".join(doctors['name'].astype(str).tolist()))
 
         # Shifts & vacations
         if not f_shifts:
@@ -234,6 +248,3 @@ if schedule is not None:
 
 else:
     st.info("Upload your **shifts.csv** (and optional **vacations.csv**) above, then click **Generate Schedule**.")
-
-
-
