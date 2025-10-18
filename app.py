@@ -1,12 +1,17 @@
-# app.py — fallback version (no OR-Tools required)
+# app.py — Luminosa Call Scheduler (Fallback: no OR-Tools)
+# Requirements (in requirements.txt):
+# streamlit==1.40.0
+# pandas==2.2.3
+# numpy==2.1.3
+# streamlit-calendar==1.0.0
 
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Physician Call Scheduler (Fallback)", layout="wide")
+st.set_page_config(page_title="Physician Call Scheduler", layout="wide")
 st.title("Physician Call Scheduler — Fallback (No OR-Tools)")
-st.caption("Upload doctors, shifts, and vacations CSVs, then click Generate. Uses a simple round-robin algorithm with PTO blocking.")
+st.caption("Upload doctors, shifts, and vacations CSVs, then click Generate. Uses a simple round-robin algorithm with PTO blocking. Calendar view included.")
 
 with st.expander("CSV format help", expanded=False):
     st.markdown("""
@@ -18,6 +23,10 @@ with st.expander("CSV format help", expanded=False):
 
     **vacations.csv** (optional)
     - Columns: `doctor_id` (int), `start` (date or datetime), `end` (date or datetime)
+
+    Tips:
+    - Save as **CSV UTF-8** from Excel/Numbers to avoid encoding errors.
+    - `is_weekend`/`is_holiday` may be True/False, 1/0, Yes/No.
     """)
 
 col1, col2, col3 = st.columns(3)
@@ -29,7 +38,8 @@ with col3:
     vacations_file = st.file_uploader("Upload vacations.csv (optional)", type=["csv"], key="vacations")
 
 def parse_bool(x):
-    if isinstance(x, bool): return x
+    if isinstance(x, bool): 
+        return x
     s = str(x).strip().lower()
     return s in ("1","true","t","yes","y")
 
@@ -39,10 +49,10 @@ def load_data():
     doctors = pd.read_csv(doctors_file)
     shifts = pd.read_csv(shifts_file)
     vacations = pd.read_csv(vacations_file) if vacations_file else pd.DataFrame(columns=["doctor_id","start","end"])
-
     # normalize types
     doctors["id"] = doctors["id"].astype(int)
-    doctors["fte"] = doctors["fte"].astype(float)
+    if "fte" in doctors.columns:
+        doctors["fte"] = doctors["fte"].astype(float)
     shifts["id"] = shifts["id"].astype(int)
     shifts["start"] = pd.to_datetime(shifts["start"])
     shifts["end"] = pd.to_datetime(shifts["end"])
@@ -55,18 +65,25 @@ def load_data():
     return doctors, shifts, vacations
 
 st.markdown("---")
-WEEKEND_WEIGHT = st.number_input("Weekend weight (for summary only)", value=1.5, step=0.1, min_value=0.0)
-HOLIDAY_WEIGHT = st.number_input("Holiday weight (for summary only)", value=2.0, step=0.1, min_value=0.0)
+with st.sidebar:
+    st.subheader("Display & Summary Options")
+    WEEKEND_WEIGHT = st.number_input("Weekend weight (summary only)", value=1.5, step=0.1, min_value=0.0)
+    HOLIDAY_WEIGHT = st.number_input("Holiday weight (summary only)", value=2.0, step=0.1, min_value=0.0)
+    default_view = st.selectbox("Calendar default view", ["dayGridMonth", "timeGridWeek", "timeGridDay"], index=0)
+    show_week_numbers = st.checkbox("Show week numbers", value=False)
 
 def overlaps(a_start, a_end, b_start, b_end):
     return not (a_end <= b_start or a_start >= b_end)
 
 def fallback_round_robin(doctors_df, shifts_df, vacations_df):
-    """Assigns shifts in order, skipping doctors who are on PTO for that shift.
-       Simple and predictable; does NOT enforce rest windows or complex fairness.
+    """Simple round-robin assignment that skips doctors on PTO for a shift.
+       Does NOT enforce rest rules or advanced fairness—this is for demo/MVP.
     """
     d_ids = doctors_df["id"].tolist()
+    if not d_ids:
+        return None, "No doctors found."
     name_by_id = dict(zip(doctors_df["id"], doctors_df["name"]))
+
     vac_map = {}
     for _, v in vacations_df.iterrows():
         vac_map.setdefault(int(v["doctor_id"]), []).append((v["start"], v["end"]))
@@ -80,7 +97,6 @@ def fallback_round_robin(doctors_df, shifts_df, vacations_df):
             d = d_ids[ix % len(d_ids)]
             ix += 1
             tried += 1
-
             # block if PTO overlaps
             blocked = False
             for (vs, ve) in vac_map.get(int(d), []):
@@ -89,17 +105,16 @@ def fallback_round_robin(doctors_df, shifts_df, vacations_df):
                     break
             if blocked:
                 continue
-
-            # assign!
+            # assign
             rows.append({
                 "shift_id": int(sh["id"]),
                 "start": sh["start"],
                 "end": sh["end"],
-                "kind": sh["kind"],
+                "kind": sh.get("kind", "A"),
                 "is_weekend": bool(sh["is_weekend"]),
                 "is_holiday": bool(sh["is_holiday"]),
                 "doctor_id": int(d),
-                "doctor": name_by_id[d],
+                "doctor": name_by_id.get(d, f"Doctor {d}"),
             })
             assigned = True
             break
@@ -111,13 +126,13 @@ def fallback_round_robin(doctors_df, shifts_df, vacations_df):
     return out, None
 
 def add_weights(df):
-    w = []
-    for _, r in df.iterrows():
-        wt = 1.0
-        if r["is_weekend"]: wt *= WEEKEND_WEIGHT
-        if r["is_holiday"]: wt *= HOLIDAY_WEIGHT
-        w.append(wt)
-    df = df.copy(); df["weight"] = w
+    def weight_row(r):
+        w = 1.0
+        if r["is_weekend"]: w *= WEEKEND_WEIGHT
+        if r["is_holiday"]: w *= HOLIDAY_WEIGHT
+        return w
+    df = df.copy()
+    df["weight"] = df.apply(weight_row, axis=1)
     return df
 
 if st.button("Generate Schedule", type="primary"):
@@ -128,12 +143,12 @@ if st.button("Generate Schedule", type="primary"):
         st.stop()
 
     schedule, err = fallback_round_robin(doctors, shifts, vacations)
-        if err:
+    if err:
         st.error(err)
     else:
         st.success("Schedule generated (fallback mode).")
 
-        # --- TABS: Table | Calendar | Summary ---
+        # ---------- TABS ----------
         tab_table, tab_cal, tab_summary = st.tabs(["📋 Table", "🗓️ Calendar", "📊 Summary"])
 
         # ===== TABLE TAB =====
@@ -146,40 +161,38 @@ if st.button("Generate Schedule", type="primary"):
         with tab_cal:
             try:
                 from streamlit_calendar import calendar as st_calendar
-            except Exception as e:
+            except Exception:
                 st.error("Calendar component not installed. Add `streamlit-calendar==1.0.0` to requirements.txt and redeploy.")
                 st.stop()
 
-            # Build FullCalendar events
-            # Streamlit Calendar expects ISO strings; end is exclusive, so add +1 minute to avoid all-day rounding issues.
+            # Build FullCalendar events: end must be exclusive, add +1 minute to avoid truncation in month view
             events = []
             for _, r in schedule.iterrows():
-                title = f"{r['doctor']} ({r['kind']})"
+                title = f"{r['doctor']} ({str(r.get('kind','A')).upper()})"
                 start_iso = pd.to_datetime(r["start"]).isoformat()
-                # make 'end' exclusive for dayGridMonth views
                 end_iso = (pd.to_datetime(r["end"]) + pd.Timedelta(minutes=1)).isoformat()
 
-                # Color logic
-                base_color = "#2563eb"  # blue
+                # Color scheme
+                base = "#2563eb"  # weekday blue
                 if bool(r["is_weekend"]):
-                    base_color = "#10b981"  # green
+                    base = "#10b981"  # weekend green
                 if bool(r["is_holiday"]):
-                    base_color = "#ef4444"  # red
-                if str(r["kind"]).upper() == "B":
-                    # lighter shade for B
-                    base_color = "#93c5fd" if not r["is_weekend"] and not r["is_holiday"] else base_color
+                    base = "#ef4444"  # holiday red
+                if str(r.get("kind","A")).upper() == "B" and not r["is_holiday"]:
+                    # lighter for B on non-holidays (weekend color stays green)
+                    base = "#93c5fd" if not r["is_weekend"] else base
 
                 events.append({
                     "title": title,
                     "start": start_iso,
                     "end": end_iso,
                     "allDay": True,
-                    "backgroundColor": base_color,
-                    "borderColor": base_color,
+                    "backgroundColor": base,
+                    "borderColor": base,
                 })
 
             options = {
-                "initialView": "dayGridMonth",
+                "initialView": st.session_state.get("cal_initial_view", "dayGridMonth"),
                 "height": 750,
                 "firstDay": 0,  # Sunday
                 "headerToolbar": {
@@ -188,56 +201,25 @@ if st.button("Generate Schedule", type="primary"):
                     "right": "dayGridMonth,timeGridWeek,timeGridDay"
                 },
                 "displayEventTime": False,
-                "weekNumbers": False,
+                "weekNumbers": show_week_numbers,
             }
 
+            # Persist the default view from sidebar
+            options["initialView"] = default_view
             st.caption("Tip: Use the toolbar to switch months or change views.")
             st_calendar(events=events, options=options)
 
         # ===== SUMMARY TAB =====
         with tab_summary:
             st.subheader("Fairness summary (informational)")
-            def weight_row(row):
-                w = 1.0
-                if row["is_weekend"]:
-                    w *= WEEKEND_WEIGHT
-                if row["is_holiday"]:
-                    w *= HOLIDAY_WEIGHT
-                return w
-
-            wt = schedule.apply(weight_row, axis=1)
-            weighted = schedule.assign(weight=wt)
-
+            weighted = add_weights(schedule)
             summary = weighted.groupby("doctor").agg(
                 shifts=("shift_id","count"),
                 weighted_calls=("weight","sum"),
                 weekends=("is_weekend","sum"),
                 holidays=("is_holiday","sum"),
             ).reset_index()
-
             st.dataframe(summary, use_container_width=True)
-
-        st.success("Schedule generated (fallback mode).")
-        st.dataframe(schedule, use_container_width=True)
-
-        # Download CSV
-        csv = schedule.to_csv(index=False).encode("utf-8")
-        st.download_button("Download schedule.csv", data=csv, file_name="schedule.csv", mime="text/csv")
-
-        # Fairness summary (informational)
-        st.subheader("Fairness summary (informational)")
-        weighted = add_weights(schedule)
-        summary = weighted.groupby("doctor").agg(
-            shifts=("shift_id","count"),
-            weighted_calls=("weight","sum"),
-            weekends=("is_weekend","sum"),
-            holidays=("is_holiday","sum"),
-        ).reset_index()
-        st.dataframe(summary, use_container_width=True)
 
 else:
     st.info("Upload your CSVs and click **Generate Schedule**.")
-
-
-
-
