@@ -128,9 +128,95 @@ if st.button("Generate Schedule", type="primary"):
         st.stop()
 
     schedule, err = fallback_round_robin(doctors, shifts, vacations)
-    if err:
+        if err:
         st.error(err)
     else:
+        st.success("Schedule generated (fallback mode).")
+
+        # --- TABS: Table | Calendar | Summary ---
+        tab_table, tab_cal, tab_summary = st.tabs(["📋 Table", "🗓️ Calendar", "📊 Summary"])
+
+        # ===== TABLE TAB =====
+        with tab_table:
+            st.dataframe(schedule, use_container_width=True)
+            csv = schedule.to_csv(index=False).encode("utf-8")
+            st.download_button("Download schedule.csv", data=csv, file_name="schedule.csv", mime="text/csv")
+
+        # ===== CALENDAR TAB =====
+        with tab_cal:
+            try:
+                from streamlit_calendar import calendar as st_calendar
+            except Exception as e:
+                st.error("Calendar component not installed. Add `streamlit-calendar==1.0.0` to requirements.txt and redeploy.")
+                st.stop()
+
+            # Build FullCalendar events
+            # Streamlit Calendar expects ISO strings; end is exclusive, so add +1 minute to avoid all-day rounding issues.
+            events = []
+            for _, r in schedule.iterrows():
+                title = f"{r['doctor']} ({r['kind']})"
+                start_iso = pd.to_datetime(r["start"]).isoformat()
+                # make 'end' exclusive for dayGridMonth views
+                end_iso = (pd.to_datetime(r["end"]) + pd.Timedelta(minutes=1)).isoformat()
+
+                # Color logic
+                base_color = "#2563eb"  # blue
+                if bool(r["is_weekend"]):
+                    base_color = "#10b981"  # green
+                if bool(r["is_holiday"]):
+                    base_color = "#ef4444"  # red
+                if str(r["kind"]).upper() == "B":
+                    # lighter shade for B
+                    base_color = "#93c5fd" if not r["is_weekend"] and not r["is_holiday"] else base_color
+
+                events.append({
+                    "title": title,
+                    "start": start_iso,
+                    "end": end_iso,
+                    "allDay": True,
+                    "backgroundColor": base_color,
+                    "borderColor": base_color,
+                })
+
+            options = {
+                "initialView": "dayGridMonth",
+                "height": 750,
+                "firstDay": 0,  # Sunday
+                "headerToolbar": {
+                    "left": "prev,next today",
+                    "center": "title",
+                    "right": "dayGridMonth,timeGridWeek,timeGridDay"
+                },
+                "displayEventTime": False,
+                "weekNumbers": False,
+            }
+
+            st.caption("Tip: Use the toolbar to switch months or change views.")
+            st_calendar(events=events, options=options)
+
+        # ===== SUMMARY TAB =====
+        with tab_summary:
+            st.subheader("Fairness summary (informational)")
+            def weight_row(row):
+                w = 1.0
+                if row["is_weekend"]:
+                    w *= WEEKEND_WEIGHT
+                if row["is_holiday"]:
+                    w *= HOLIDAY_WEIGHT
+                return w
+
+            wt = schedule.apply(weight_row, axis=1)
+            weighted = schedule.assign(weight=wt)
+
+            summary = weighted.groupby("doctor").agg(
+                shifts=("shift_id","count"),
+                weighted_calls=("weight","sum"),
+                weekends=("is_weekend","sum"),
+                holidays=("is_holiday","sum"),
+            ).reset_index()
+
+            st.dataframe(summary, use_container_width=True)
+
         st.success("Schedule generated (fallback mode).")
         st.dataframe(schedule, use_container_width=True)
 
